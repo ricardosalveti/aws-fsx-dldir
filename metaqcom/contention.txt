@@ -1,0 +1,12 @@
+jobs per cell: {('old', '/efs'): 3849, ('new', '/efsx'): 725, ('old', '/efsx'): 717, ('new', '/efs'): 440}
+protocol   storage   contended  collided
+new        /efs            381         0   []
+new        /efsx            57         0   []
+old        /efs            291         0   []
+old        /efsx            12         0   []
+
+start gap between the first two runners (ms), contended downloads:
+  new   /efs   clean     n= 381 median=  1323  buckets: {'<100': 14, '<300': 33, '<1000': 108, '<5000': 226}
+  new   /efsx  clean     n=  57 median=  1148  buckets: {'<100': 4, '<300': 4, '<1000': 16, '<5000': 33}
+  old   /efs   clean     n= 291 median=  1500  buckets: {'<100': 10, '<300': 22, '<1000': 71, '<5000': 188}
+  old   /efsx  clean     n=  12 median=  2951  buckets: {'<300': 1, '<1000': 2, '<5000': 9}

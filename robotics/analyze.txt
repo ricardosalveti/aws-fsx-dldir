@@ -1,0 +1,22 @@
+scanned jobs: 5947  events: 808
+events per class/storage: {('B', '/efs'): 2, ('C', '/efs'): 5, ('A', '/efsx'): 327, ('B', '/efsx'): 474}
+jobs per class/storage: {('B', '/efs'): 2, ('C', '/efs'): 4, ('A', '/efsx'): 50, ('B', '/efsx'): 234}
+
+class A groups (run, attempt, recipe): 17
+  2026-09-11T15:20:09.899 run=34538407155 att=2 python3-jinja2-native-3.1.6-r0                jobs=2 runners=2 last=15:20:10.779 /efsx ci-fsx-sstate-cache
+  2026-09-11T15:20:09.899 run=34538407155 att=3 python3-jinja2-native-3.1.6-r0                jobs=1 runners=1 last=15:20:09.899 /efsx ci-fsx-sstate-cache
+  2026-09-11T15:22:08.912 run=34538407155 att=2 rust-source-1.98.0-1.98.0-r0                  jobs=1 runners=1 last=15:22:11.176 /efsx ci-fsx-sstate-cache
+  2026-09-11T15:22:08.912 run=34538407155 att=3 rust-source-1.98.0-1.98.0-r0                  jobs=1 runners=1 last=15:22:11.176 /efsx ci-fsx-sstate-cache
+  2026-09-12T06:03:17.601 run=34538407155 att=4 cargo-c-native-0.10.25+cargo-0.99.0-r0        jobs=2 runners=2 last=06:03:18.655 /efsx ci-fsx-sstate-cache
+  2026-09-13T18:47:26.819 run=34538407155 att=5 python3-setuptools-rust-native-1.13.0-r0      jobs=2 runners=2 last=18:47:28.551 /efsx ci-fsx-sstate-cache
+  2026-09-13T18:57:57.953 run=34538407155 att=5 librsvg-2.62.3-r0                             jobs=2 runners=2 last=18:57:59.717 /efsx ci-fsx-sstate-cache
+  2026-09-15T02:16:16.419 run=34916088202 att=2 python3-maturin-native-1.15.0-r0              jobs=2 runners=2 last=02:16:17.465 /efsx ci-fsx-sstate-cache
+  2026-09-24T00:47:03.653 run=35938315722 att=1 aardvark-dns-1.17.1-r0                        jobs=2 runners=2 last=00:47:05.096 /efsx ci-fsx-sstate-cache
+  2026-09-24T00:47:03.653 run=35938315722 att=2 aardvark-dns-1.17.1-r0                        jobs=1 runners=1 last=00:47:05.096 /efsx ci-fsx-sstate-cache
+  2026-09-24T00:47:03.653 run=35938315722 att=3 aardvark-dns-1.17.1-r0                        jobs=1 runners=1 last=00:47:05.096 /efsx ci-fsx-sstate-cache
+  2026-09-24T00:51:03.850 run=35938315722 att=1 docker-compose-5.1.4-r0                       jobs=4 runners=4 last=00:51:49.991 /efsx ci-fsx-sstate-cache
+  2026-09-24T00:51:03.850 run=35938315722 att=2 docker-compose-5.1.4-r0                       jobs=4 runners=4 last=00:51:49.991 /efsx ci-fsx-sstate-cache
+  2026-09-24T00:51:03.850 run=35938315722 att=3 docker-compose-5.1.4-r0                       jobs=4 runners=4 last=00:51:49.991 /efsx ci-fsx-sstate-cache
+  2026-09-24T00:52:01.359 run=35938315722 att=1 nerdctl-v2.3.1-r0                             jobs=6 runners=6 last=00:54:54.195 /efsx ci-fsx-sstate-cache
+  2026-09-24T00:52:01.359 run=35938315722 att=2 nerdctl-v2.3.1-r0                             jobs=6 runners=6 last=00:54:54.195 /efsx ci-fsx-sstate-cache
+  2026-09-24T00:52:01.359 run=35938315722 att=3 nerdctl-v2.3.1-r0                             jobs=6 runners=6 last=00:54:54.195 /efsx ci-fsx-sstate-cache

@@ -1,0 +1,11 @@
+jobs per cell: {('new', '/efs'): 860, ('old', '/efs'): 4139, ('new', '/efsx'): 357}
+protocol   storage   contended  collided
+new        /efs            104         0   []
+new        /efsx           388         3   [('09-12 06:03:06', 'cargo-c-native-0.10.25+cargo-0.99.0-r0'), ('09-13 18:47:24', 'python3-setuptools-rust-native-1.13.0-r0'), ('09-15 02:15:27', 'python3-maturin-native-1.15.0-r0')]
+old        /efs           1063         0   []
+
+start gap between the first two runners (ms), contended downloads:
+  new   /efs   clean     n= 104 median=  1205  buckets: {'<100': 3, '<300': 9, '<1000': 34, '<5000': 58}
+  new   /efsx  clean     n= 385 median=   708  buckets: {'<100': 59, '<300': 57, '<1000': 113, '<5000': 156}
+  new   /efsx  COLLIDED  n=   3 median=   297  buckets: {'<100': 1, '<300': 1, '<5000': 1}
+  old   /efs   clean     n=1063 median=   870  buckets: {'<100': 71, '<300': 123, '<1000': 392, '<5000': 477}

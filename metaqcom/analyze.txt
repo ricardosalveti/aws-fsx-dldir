@@ -1,0 +1,25 @@
+scanned jobs: 5748  events: 81
+events per class/storage: {('A', '/efs'): 2, ('C', '/efs'): 2, ('A', '/efsx'): 71, ('C', '/efsx'): 6}
+jobs per class/storage: {('A', '/efs'): 1, ('C', '/efs'): 1, ('A', '/efsx'): 23, ('C', '/efsx'): 2}
+
+class A groups (run, attempt, recipe): 20
+  2026-08-13T09:24:31.165 run=31685636432 att=1 qcom-sensors-binaries-2.0.2-r0                jobs=1 runners=1 last=09:24:31.166 /efs shikra-release
+  2026-09-03T02:30:21.776 run=33707119200 att=1 camxlib-hamoa-1.0.41-r0                       jobs=1 runners=1 last=02:31:02.643 /efsx camx_downstream
+  2026-09-03T08:28:44.437 run=33707119200 att=2 camxlib-hamoa-1.0.41-r0                       jobs=1 runners=1 last=08:29:34.895 /efsx camx_downstream
+  2026-09-03T10:00:32.683 run=33707119200 att=3 camxlib-hamoa-1.0.41-r0                       jobs=1 runners=1 last=10:00:57.120 /efsx camx_downstream
+  2026-09-08T14:44:49.665 run=34200981925 att=2 firmware-qcom-cdt-qcs615-1.0-r0               jobs=1 runners=1 last=14:44:56.715 /efsx CDT_LYRA_EVK
+  2026-09-22T04:03:38.326 run=35684511207 att=1 docker-compose-5.5.1-r0                       jobs=3 runners=3 last=04:04:48.836 /efsx bump-base-lock-20260908
+  2026-09-22T04:56:34.009 run=35684511207 att=2 docker-compose-5.5.1-r0                       jobs=1 runners=1 last=04:59:10.839 /efsx bump-base-lock-20260908
+  2026-09-22T12:50:25.172 run=35684511207 att=3 docker-compose-5.5.1-r0                       jobs=1 runners=1 last=12:52:15.287 /efsx bump-base-lock-20260908
+  2026-09-24T16:09:42.485 run=36023613337 att=1 camxlib-hamoa-1.0.48-r0                       jobs=1 runners=1 last=16:11:22.561 /efsx camx_downstream
+  2026-09-25T01:45:37.790 run=36023613337 att=2 camxlib-hamoa-1.0.48-r0                       jobs=1 runners=1 last=01:46:15.952 /efsx camx_downstream
+  2026-09-25T04:50:11.018 run=36095243766 att=1 camxlib-hamoa-1.0.48-r0                       jobs=1 runners=1 last=04:50:44.770 /efsx camx_downstream
+  2026-09-25T10:40:04.982 run=36124535934 att=1 qcom-adreno-1.887.1-r0                        jobs=1 runners=1 last=10:40:04.983 /efsx master
+  2026-09-26T05:15:07.096 run=36219727612 att=1 qcom-adreno-1.887.2-r0                        jobs=1 runners=1 last=05:15:13.667 /efsx master
+  2026-09-27T17:49:53.601 run=36219727612 att=2 qcom-adreno-1.887.2-r0                        jobs=1 runners=1 last=17:50:01.530 /efsx master
+  2026-09-27T18:14:01.517 run=36219727612 att=3 qcom-adreno-1.887.2-r0                        jobs=1 runners=1 last=18:14:08.986 /efsx master
+  2026-09-27T18:32:59.880 run=36340100617 att=1 docker-compose-5.5.1-r0                       jobs=3 runners=3 last=18:39:27.254 /efsx bump-base-lock-20260926
+  2026-09-27T19:00:23.686 run=36340100617 att=2 docker-compose-5.5.1-r0                       jobs=1 runners=1 last=19:51:13.112 /efsx bump-base-lock-20260926
+  2026-09-27T21:27:24.960 run=36340100617 att=3 docker-compose-5.5.1-r0                       jobs=1 runners=1 last=21:41:35.176 /efsx bump-base-lock-20260926
+  2026-09-28T14:25:06.781 run=36340100617 att=4 docker-compose-5.5.1-r0                       jobs=1 runners=1 last=14:39:54.636 /efsx bump-base-lock-20260926
+  2026-09-28T17:51:04.711 run=36456733827 att=1 docker-compose-5.5.1-r0                       jobs=1 runners=1 last=18:05:31.866 /efsx bump-base-lock-20260926

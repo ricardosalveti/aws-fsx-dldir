@@ -1,0 +1,9 @@
+jobs with unknown storage (log without cache dir): 80
+repo          protocol storage   runs   jobs do_fetch  failed    A-jobs    B-jobs distinct files with class A
+meta-qcom     new      /efs       20    440    58616      41         0         0 0
+meta-qcom     new      /efsx      98    725    42032     392        23         0 4
+meta-qcom     old      /efs      289   3849   210242    3849         1         0 1
+meta-qcom     old      /efsx      30    717     7355      57         0         0 0
+robotics-sdk  new      /efs       55    860   102461       5         0         0 0
+robotics-sdk  new      /efsx      12    365    95160      24        34       159 24
+robotics-sdk  old      /efs      243   4240   471250     124         0         2 0
