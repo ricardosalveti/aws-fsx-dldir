@@ -8,7 +8,9 @@ protocol used by BitBake that fails. Run it on FSx (`/efsx`) and on EFS
 Needs: 2 or more hosts (ephemeral runner instances are fine) that mount the
 same directory, Python 3.8+, clocks synced by chrony (the runners are). The
 probe uses only the standard library, writes only to `--dir` (shared) and
-`--log-dir` (local), and removes its files from `--dir` when it exits normally.
+`--log-dir` (local). When every host has finished, remove the shared
+directory from one host (`rm -rf /efsx/qli/lock-probe`); a host that finishes
+first does not remove the lock files, another host may still be using them.
 
 ## 1. Copy the script to every host
 
@@ -99,7 +101,8 @@ Each mode ends with one `summary` line per worker process:
 | violations only in `bitbake` / `bitbake-shared`                    | the locks work; BitBake's unlink + re-create + `stat()` lock-file protocol is what fails on this mount     |
 | `bitbake-shared-fresh` clean while `bitbake-shared` fails          | the failure comes from `stat()` being answered from the client's lookup/attribute cache                    |
 | `bitbake-shared-nounlink` clean while `bitbake-shared` fails       | the failure needs the unlink; never unlinking the lock file would be a sufficient fix on the BitBake side |
-| `stale-lockfile` events                                            | a lock was accepted on a lock file that the server had already unlinked (`st_nlink == 0`)                 |
+| `stale-lockfile` events                                            | a lock was accepted on a lock file this client already saw as unlinked (`st_nlink == 0`); zero events prove little, `fstat()` may come from the attribute cache |
+| `marker-vanished` events                                           | another participant removed the marker while its creator was inside                                       |
 | all clean on FSx and on EFS                                        | the probe does not reproduce it; the CI collisions need another trigger (load, delegations, lease events)  |
 
 The `env` lines carry the NFS per-operation counters (`LOCK`, `LOCKU`, `OPEN`,
@@ -109,6 +112,13 @@ the client handles locks.
 
 ## Options worth varying on a second run
 
+- `--round-ms 1000`: every attempt starts at the same wall-clock instant on all
+  hosts, with the lock file absent, which is the CI pattern (two builds
+  starting the same download together). Without it the NFS lock polling is
+  unfair: after the first seconds one host keeps the lock and the other waits
+  for tens of seconds, so a clean mode may have seen almost no contention.
+- `--verbose`: logs every entry with the inode held, to line up both hosts at
+  the moment of a violation (larger logs).
 - `--hold-ms 200` (longer critical section, like a real download)
 - `--workers 4` (more contention from each host)
 - mount options on one host: `lookupcache=positive`, `actimeo=0`, `nconnect=1`,

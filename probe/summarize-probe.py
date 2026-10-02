@@ -36,6 +36,12 @@ def host_of(who):
     return who.rsplit(":", 1)[0]
 
 
+def holder_host(violation):
+    """Host named in the marker found by a violation, None if unreadable."""
+    first = (violation.get("holder") or "").split(" ", 1)[0]
+    return host_of(first) if ":" in first and not first.startswith("unreadable") else None
+
+
 def lines_from(path):
     """(name, line) for every probe log line found in path."""
     def wanted(name):
@@ -143,57 +149,87 @@ def main():
             print("mount:      %s" % source[key])
         print("hosts:      %d  %s" % (len(hosts), " ".join(hosts)))
         print()
-        print("%-24s %5s %6s %9s %9s %9s %8s %10s %10s  %s" % (
-            "mode", "hosts", "procs", "iters", "cross-hv", "same-hv", "stale-lf", "wait p50ms", "wait maxms", "check"))
+        print("%-24s %5s %6s %9s %7s %7s %7s %8s %8s %10s %10s  %s" % (
+            "mode", "hosts", "procs", "iters", "cross", "same", "unknown", "stale-lf", "vanished",
+            "wait p50ms", "wait maxms", "check"))
+        print("%-24s %5s %6s %9s %23s" % ("", "", "", "", "<----- violations ---->"))
 
-        verdict = {}
+        verdict, mode_ops = {}, {}
         for mode in MODES:
             sm = [e for e in ev if e.get("kind") == "summary" and e.get("mode") == mode]
-            if not sm:
-                continue
             vio = [e for e in ev if e.get("kind") == "violation" and e.get("mode") == mode]
-            cross = [v for v in vio if host_of(v.get("holder", "?:").split()[0]) != host_of(v["who"])]
+            if not sm and not vio:
+                continue
+            # The holder is what the other participant wrote into the marker;
+            # it can be empty when the marker was created but not yet written.
+            cross = [v for v in vio if holder_host(v) not in (None, host_of(v["who"]))]
+            unknown = [v for v in vio if holder_host(v) is None]
             stale = sum(e.get("stale_lockfile", 0) for e in sm)
-            mhosts = {host_of(e["who"]) for e in sm}
+            vanished = sum(e.get("marker_vanished", 0) for e in sm)
+            # A cross-host violation proves the other host took part even when
+            # its own files are missing.
+            mhosts = {host_of(e["who"]) for e in sm} | {holder_host(v) for v in cross}
             iters = sum(e["iterations"] for e in sm)
-            p50 = statistics.median(e["wait_ms_median"] for e in sm if e.get("wait_ms_median") is not None)
-            mx = max(e["wait_ms_max"] or 0 for e in sm)
+            waits = [e["wait_ms_median"] for e in sm if e.get("wait_ms_median") is not None]
+            p50 = statistics.median(waits) if waits else 0
+            mx = max([e["wait_ms_max"] or 0 for e in sm] or [0])
             # Every host ends a mode at the same wall-clock time when the
             # schedules matched; a spread of more than a few seconds means the
             # hosts did not run this mode together.
             ends = [e["t"] for e in sm]
-            spread = max(ends) - min(ends)
+            spread = max(ends) - min(ends) if ends else 0
             notes = []
             if len(mhosts) < 2:
                 notes.append("ONLY ONE HOST: cannot test cross-host locking")
             if spread > 5:
-                notes.append("hosts ended %.0fs apart: different --start-at?" % spread)
+                notes.append("hosts ended %.0fs apart: different --start-at or a stuck lock" % spread)
             # The locks are not fair, so a low median wait does not mean no
             # contention; a host that barely got in does.
             per_host = {}
             for e in sm:
                 per_host[host_of(e["who"])] = per_host.get(host_of(e["who"]), 0) + e["iterations"]
             for h, n in sorted(per_host.items()):
-                if len(mhosts) >= 2 and n < 0.05 * iters:
+                if len(per_host) >= 2 and n < 0.05 * iters:
                     notes.append("%s got only %d of %d iterations" % (h, n, iters))
-            ok = len(mhosts) >= 2 and spread <= 5
-            verdict[mode] = (ok, len(vio), len(cross), stale)
-            print("%-24s %5d %6d %9d %9d %9d %8d %10.1f %10.1f  %s" % (
-                mode, len(mhosts), len(sm), iters, len(cross), len(vio) - len(cross), stale, p50, mx,
-                "; ".join(notes) or "ok"))
+            missing = sorted(mhosts - set(per_host))
+            if missing:
+                notes.append("no summary from %s: pass its files too" % " ".join(missing))
+            errors = [e for e in ev if e.get("kind") == "error" and e.get("mode") == mode]
+            if errors:
+                notes.append("%d process(es) died: %s" % (len(errors), errors[0].get("error", "?")))
+            ok = (len(mhosts) >= 2 and spread <= 5) or bool(cross)
+            verdict[mode] = (ok, len(vio), len(cross), stale, iters, vanished)
+            print("%-24s %5d %6d %9d %7d %7d %7d %8d %8d %10.1f %10.1f  %s" % (
+                mode, len(mhosts), len(sm), iters, len(cross), len(vio) - len(cross) - len(unknown),
+                len(unknown), stale, vanished, p50, mx, "; ".join(notes) or "ok"))
             for v in vio[:args.show]:
-                print("    %s  %s  inside while  %s" % (v.get("ts", ""), v["who"], v.get("holder", "?")))
+                print("    %s  %s  inside while  %s" % (v.get("ts", ""), v["who"], v.get("holder") or "(empty marker)"))
             if len(vio) > args.show:
                 print("    ... %d more" % (len(vio) - args.show))
+            for e in sm:
+                if e.get("nfs_ops"):
+                    mode_ops.setdefault(mode, {})[host_of(e["who"])] = (e["nfs_ops"], per_host.get(host_of(e["who"]), 0))
+
+        # NFS operations per mode, counted by the first process of each host
+        # (the counters are per mount, so they include all its workers).
+        if mode_ops:
+            print()
+            print("NFS ops per mode and host (per iteration of that host):")
+            print("    %-24s %-18s %s" % ("mode", "host", " ".join("%11s" % o for o in OPS)))
+            for mode in MODES:
+                for h, (ops, n) in sorted(mode_ops.get(mode, {}).items()):
+                    print("    %-24s %-18s %s" % (mode, h, " ".join(
+                        "%5d %5s" % (ops.get(o, 0), "(%.1f)" % (ops.get(o, 0) / n) if n else "") for o in OPS)))
 
         # NFS operation counts of each process during the whole run
-        print()
-        print("NFS ops during the run (end - start, per host):")
         envs = {}
         for e in ev:
             if e.get("kind") == "env":
                 envs.setdefault(e["who"], {})[e["when"]] = e.get("nfs_ops", {})
-        print("    %-28s %s" % ("host", " ".join("%11s" % o for o in OPS)))
+        if envs:
+            print()
+            print("NFS ops during the run (end - start, per host):")
+            print("    %-28s %s" % ("host", " ".join("%11s" % o for o in OPS)))
         deleg = 0
         for who, w in sorted(envs.items()):
             if "start" in w and "end" in w:
@@ -201,7 +237,7 @@ def main():
                 deleg += delta["DELEGRETURN"]
                 print("    %-28s %s" % (host_of(who), " ".join("%11d" % delta[o] for o in OPS)))
             else:
-                print("    %-28s (no end record: run interrupted?)" % host_of(who))
+                print("    %-28s (no end record: the probe did not finish)" % host_of(who))
         for e in ev:
             if e.get("kind") == "env" and e.get("when") == "end":
                 msgs = [l for l in e.get("dmesg_nfs", "").splitlines()
@@ -216,35 +252,39 @@ def main():
         tested = [m for m, v in real.items() if v[0]]
         bad = [m for m, v in real.items() if v[1] or v[3]]
         if "nolock" in verdict:
-            _, n, cross, _ = verdict["nolock"]
+            cross = verdict["nolock"][2]
             print("  - detector self test (nolock): %s" % (
                 "works across hosts, %d cross-host violations seen" % cross if cross else
                 "NO cross-host violations: the hosts did not overlap, the results below are not meaningful"))
         if not real:
             print("  - no lock modes in this input (self test only)")
-        elif not tested:
-            print("  - INCONCLUSIVE: no mode ran on two or more hosts at the same time")
-            status = status or 2
-        elif not bad:
-            print("  - NOT REPRODUCED: 0 violations and 0 stale lock files in %s" % ", ".join(tested))
-            print("    next: --hold-ms 200 --workers 4, then one mount option change per run (see README)")
-        else:
+        elif bad:
             status = 1
             print("  - REPRODUCED in: %s" % ", ".join(
-                "%s (%d violations, %d cross-host, %d stale-lockfile)" % (m, real[m][1], real[m][2], real[m][3])
-                for m in bad))
-            plain = [m for m in ("flock", "posix") if m in bad]
-            if plain:
-                print("  - plain flock/lockf fails: the NFS locks themselves do not exclude across hosts (AWS side)")
+                "%s (%d violations, %d cross-host, %d stale-lockfile, in %d iterations)"
+                % (m, real[m][1], real[m][2], real[m][3], real[m][4]) for m in bad))
+            if any(m in bad for m in ("flock", "posix")):
+                print("  - plain flock/lockf fails: the NFS locks themselves do not exclude across hosts")
             elif any(m.startswith("bitbake") for m in bad):
                 print("  - plain flock/lockf clean, BitBake protocol fails: the lock-file protocol"
                       " (unlink + re-create + stat) is what breaks on this mount")
-                for fix, why in (("bitbake-shared-fresh", "stat() answered from the client cache"),
-                                 ("bitbake-shared-nounlink", "never unlinking the lock file is a sufficient fix")):
-                    if "bitbake-shared" in bad and fix in real and fix not in bad and real[fix][0]:
-                        print("  - %s clean while bitbake-shared fails: %s" % (fix, why))
+            clean = ["%s: 0 in %d iterations" % (m, v[4]) for m, v in real.items() if v[0] and m not in bad]
+            if clean:
+                print("  - clean: %s" % "; ".join(clean))
+                print("    a clean mode only counts with as many iterations under contention as the failing one")
+        elif not tested:
+            print("  - INCONCLUSIVE: no mode ran on two or more hosts at the same time")
+            status = status or 2
+        else:
+            print("  - NOT REPRODUCED: 0 violations and 0 stale lock files in %s" % ", ".join(
+                "%s (%d iterations)" % (m, real[m][4]) for m in tested))
+            print("    next: --round-ms 1000, then --hold-ms 200 --workers 4, then one mount option change per run")
+        if any(v[5] for v in verdict.values()):
+            print("  - markers vanished from under their creator: another participant removed them while it was"
+                  " inside (probe versions before 2026-10-03 also did this in their end-of-run cleanup)")
         if deleg:
-            print("  - DELEGRETURN grew by %d: the server hands out delegations" % deleg)
+            print("  - DELEGRETURN grew by %d: the server grants delegations; while a client holds one, the Linux"
+                  " client handles flock() locally" % deleg)
         print()
     sys.exit(status)
 

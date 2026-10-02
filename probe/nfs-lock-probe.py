@@ -37,8 +37,12 @@
 #                                      across hosts (NFS client/server problem)
 #   violations only in bitbake modes   the locks work; the lock file protocol
 #                                      (unlink + re-create + stat) is what fails
-#   "stale-lockfile" events            a lock was accepted on a file that had
-#                                      already been unlinked on the server
+#   "stale-lockfile" events            a lock was accepted on a file that this
+#                                      client already saw as unlinked (st_nlink
+#                                      0); nlink 1 proves nothing, fstat() may
+#                                      come from the attribute cache
+#   "marker-vanished" events           another participant removed our marker
+#                                      while we were inside the section
 #
 # Only the Python standard library is used. Nothing is written outside --dir
 # (shared) and --log-dir (local).
@@ -55,6 +59,7 @@ import sys
 import time
 
 HOST = socket.gethostname()
+STALE_MARKER_S = 60.0
 ME = "%s:%d" % (HOST, os.getpid())
 
 
@@ -76,7 +81,8 @@ class Log:
         kw["ts"] = iso(kw["t"])
         line = json.dumps(kw, sort_keys=True)
         self.f.write(line + "\n")
-        if self.echo or kind in ("violation", "stale-lockfile", "stale-marker", "error", "summary", "env"):
+        if self.echo or kind in ("violation", "stale-lockfile", "stale-marker", "marker-vanished", "error",
+                                     "summary", "env"):
             print(line, flush=True)
 
 
@@ -160,8 +166,8 @@ def bb_unlockfile(lf, unlink=True):
 # --- critical section --------------------------------------------------------
 
 def critical_section(args, log, mode, it, lockinfo):
+    """Returns (violations, vanished markers) of one pass."""
     marker = os.path.join(args.dir, "probe-%s.marker" % mode)
-    mine = "%s it=%d t=%s e=%.6f" % (ME, it, iso(now()), now())
     try:
         fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o664)
     except FileExistsError:
@@ -173,31 +179,49 @@ def critical_section(args, log, mode, it, lockinfo):
             other = "unreadable: %s" % e
         m = re.search(r" e=([0-9.]+)", other)
         age = now() - float(m.group(1)) if m else 0
-        if age > max(5.0, 50 * args.hold_ms / 1000.0):
+        # An OPEN can take seconds on a busy mount, so only a marker that is
+        # much older than any NFS call counts as left behind.
+        if age > max(STALE_MARKER_S, 50 * args.hold_ms / 1000.0):
             # left behind by a participant that was killed inside the section
             log.event("stale-marker", mode=mode, it=it, holder=other, age_s=round(age, 1))
             try:
                 os.unlink(marker)
             except OSError:
                 pass
-            return 0
+            return 0, 0
         log.event("violation", mode=mode, it=it, holder=other, lock=lockinfo)
         time.sleep(args.hold_ms / 1000.0)
-        return 1
+        return 1, 0
+    mine = "%s it=%d t=%s e=%.6f" % (ME, it, iso(now()), now())
     os.write(fd, mine.encode())
     os.close(fd)
     time.sleep(args.hold_ms / 1000.0)
-    os.unlink(marker)
-    return 0
+    try:
+        os.unlink(marker)
+    except FileNotFoundError:
+        # Someone else removed our marker while we were inside: either it
+        # took it for a stale one, or it was inside at the same time.
+        log.event("marker-vanished", mode=mode, it=it, mine=mine, lock=lockinfo)
+        return 0, 1
+    return 0, 0
 
 
-def run_mode(args, log, mode, until):
+def run_mode(args, log, mode, until, count_ops):
     lockname = os.path.join(args.dir, "probe-%s.lock" % mode)
-    it = violations = stale = 0
+    it = violations = stale = vanished = 0
     waits = []
     fresh = mode.endswith("-fresh")
     unlink = not mode.endswith("-nounlink")
+    ops0 = nfs_ops(args.dir) if count_ops else None
     while now() < until:
+        if args.round_ms:
+            # Start every attempt at the same wall-clock instant on all
+            # hosts, like two builds starting the same download together.
+            r = args.round_ms / 1000.0
+            nxt = (int(now() / r) + 1) * r
+            if nxt >= until:
+                break
+            time.sleep(nxt - now())
         it += 1
         stats = {}
         t0 = now()
@@ -218,9 +242,9 @@ def run_mode(args, log, mode, until):
         waits.append(waited)
         stats["waited_ms"] = round(waited * 1000, 3)
         if mode.startswith("bitbake"):
-            # What the lock file name points to on the server right now can
-            # only be known by asking the server: a fresh fstat() of our fd
-            # tells whether the file we hold was already unlinked.
+            # st_nlink 0 means the file we hold is already unlinked. The
+            # converse is weak: fstat() may be answered from the attribute
+            # cache, so nlink 1 does not prove the server still links it.
             st = os.fstat(lf.fileno())
             stats["nlink_after"] = st.st_nlink
             if st.st_nlink == 0 or stats.get("nlink") == 0:
@@ -228,7 +252,9 @@ def run_mode(args, log, mode, until):
                 log.event("stale-lockfile", mode=mode, it=it, lock=stats)
         if args.verbose:
             log.event("enter", mode=mode, it=it, lock=stats)
-        violations += critical_section(args, log, mode, it, stats)
+        v, gone = critical_section(args, log, mode, it, stats)
+        violations += v
+        vanished += gone
         if mode == "nolock":
             pass
         elif mode in ("flock", "posix"):
@@ -238,10 +264,16 @@ def run_mode(args, log, mode, until):
         if args.pause_ms:
             time.sleep(args.pause_ms / 1000.0)
     waits.sort()
+    extra = {}
+    if count_ops:
+        # per mount, so this covers every worker of this host
+        ops1 = nfs_ops(args.dir)
+        extra["nfs_ops"] = {o: ops1[o]["ops"] - ops0.get(o, {}).get("ops", 0) for o in ops1}
     log.event("summary", mode=mode, dir=args.dir, iterations=it, violations=violations,
-              stale_lockfile=stale, hold_ms=args.hold_ms,
+              stale_lockfile=stale, marker_vanished=vanished, hold_ms=args.hold_ms,
+              round_ms=args.round_ms,
               wait_ms_median=round(waits[len(waits) // 2] * 1000, 3) if waits else None,
-              wait_ms_max=round(waits[-1] * 1000, 3) if waits else None)
+              wait_ms_max=round(waits[-1] * 1000, 3) if waits else None, **extra)
     return violations
 
 
@@ -274,9 +306,9 @@ def mountstats(path):
     return block
 
 
-def collect_env(args, log, when):
+def nfs_ops(path):
     ops = {}
-    for line in mountstats(args.dir):
+    for line in mountstats(path):
         p = line.split()
         if p and p[0].rstrip(":") in ("OPEN", "OPEN_NOATTR", "CLOSE", "LOCK", "LOCKU", "LOCKT", "LOOKUP",
                                       "GETATTR", "REMOVE", "CREATE", "RENEW", "SEQUENCE", "DELEGRETURN",
@@ -284,7 +316,11 @@ def collect_env(args, log, when):
             # ops, transmissions, major timeouts, ..., errors (last column on recent kernels)
             ops[p[0].rstrip(":")] = {"ops": int(p[1]), "trans": int(p[2]), "timeouts": int(p[3]),
                                      "errors": int(p[9]) if len(p) > 9 else None}
-    env = {"when": when, "host": HOST, "nfs_ops": ops}
+    return ops
+
+
+def collect_env(args, log, when):
+    env = {"when": when, "host": HOST, "nfs_ops": nfs_ops(args.dir)}
     if when == "start":
         env.update(
             uname=sh("uname -a"),
@@ -316,6 +352,9 @@ def main():
     p.add_argument("--align", type=int, default=300)
     p.add_argument("--hold-ms", type=float, default=20, help="time spent inside the critical section")
     p.add_argument("--pause-ms", type=float, default=0, help="time spent outside, between iterations")
+    p.add_argument("--round-ms", type=int, default=0,
+                   help="start every attempt at the next multiple of this many ms of wall-clock time, "
+                        "the same instant on every host (0: loop without waiting)")
     p.add_argument("--workers", type=int, default=1, help="processes on this host")
     p.add_argument("--log-dir", default=".", help="local directory for the event log")
     p.add_argument("--verbose", action="store_true", help="log every critical section entry")
@@ -353,20 +392,29 @@ def main():
             time.sleep(delay)
         elif delay < -args.duration:
             continue
-        total += run_mode(args, log, mode, begin + args.duration)
+        try:
+            total += run_mode(args, log, mode, begin + args.duration, children is not None)
+        except Exception as e:
+            # keep going: the other modes and the end record still matter
+            log.event("error", mode=mode, error="%s: %s" % (type(e).__name__, e))
     if children is None:
         os._exit(1 if total else 0)
     for pid in children:
         _, status = os.waitpid(pid, 0)
         total += os.waitstatus_to_exitcode(status)
     collect_env(args, log, "end")
-    # best effort: leave nothing behind on the shared directory
+    # Other hosts may still be inside their last pass (a lock wait can run
+    # past the end of the mode), so only remove markers this host left
+    # behind; the lock files stay until the directory is removed by hand.
     for m in modes:
-        for suffix in ("lock", "marker"):
-            try:
-                os.unlink(os.path.join(args.dir, "probe-%s.%s" % (m, suffix)))
-            except OSError:
-                pass
+        marker = os.path.join(args.dir, "probe-%s.marker" % m)
+        try:
+            with open(marker) as f:
+                mine = f.read().startswith(HOST + ":")
+            if mine:
+                os.unlink(marker)
+        except OSError:
+            pass
     sys.exit(1 if total else 0)
 
 
