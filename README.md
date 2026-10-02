@@ -11,7 +11,8 @@ EFS without the problem.
 - `pairs.md` — raw job log lines of every collision, per host, with ms timestamps
 - `incidents.tsv` — machine-readable incident table
 - `probe/` — `nfs-lock-probe.py`, a standalone reproducer, and how to run it on
-  two hosts against both file systems
+  two hosts against both file systems, and `summarize-probe.py`, which turns
+  the results of all hosts into a reproduced / not reproduced verdict per run
 
 ## Data
 

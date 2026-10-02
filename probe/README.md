@@ -29,8 +29,16 @@ must be given the same `--start-at`. Choose a time 3-5 minutes ahead:
         --start-at $START --workers 2 --duration 120 --hold-ms 20 | tee ~/lock-probe/efsx/stdout.txt
 
 Six modes x (120 s + 15 s gap) = about 13.5 minutes. The first line printed
-says when the first mode starts and when the last one ends. Exit status is 1
-when any violation was seen.
+says when the first mode starts and when the last one ends; it must be the
+same on every host. A JSON `env` line follows right away. After that the probe
+is silent while a mode runs and prints one `summary` line per worker when the
+mode ends (every 2 min 15 s), so 12 summary lines in total with `--workers 2`.
+`violation` or `stale-lockfile` lines in between are findings, not errors.
+Exit status is 1 when any violation was seen.
+
+To see that it is running during a mode: `pgrep -af nfs-lock-probe` (one
+process per worker), and the `LOCK`/`OPEN`/`REMOVE` counts of the `/efsx`
+block in `/proc/self/mountstats` keep growing.
 
 ## 4. Same on EFS, with a new start time
 
@@ -52,8 +60,32 @@ fills in the EFS mount options that the report is missing.
      nfsstat -c 2>/dev/null; sudo dmesg | grep -i -E 'nfs|lockd|sunrpc' | tail -50) > ~/lock-probe/host-info.txt 2>&1
     tar czf ~/lock-probe-$(hostname).tgz -C ~ lock-probe
 
-Send me the tarballs (or paste the `summary` lines of stdout.txt), and I will
-turn them into the numbers for the report.
+## 6. Summarize: was it reproduced?
+
+Copy the tarballs of all hosts to one machine and run:
+
+    python3 summarize-probe.py lock-probe-*.tgz
+
+It also takes the `~/lock-probe` directories, or the `stdout.txt` / `.jsonl`
+files directly. Always pass the files of all hosts in one call: a cross-host
+collision only shows up when the hosts are compared. Give it whatever exists:
+FSx only, EFS only, or both, and as many runs as were made. It prints one
+section per run (same shared directory and same `--start-at`), so a second
+`/efsx` run with other options is reported next to the first one, not mixed
+into it. Each section has one row per mode (hosts that took part, iterations,
+cross-host and same-host violations, stale lock files, lock waits), the NFS
+operation counts per host during the run, and a verdict that applies the
+table below: `REPRODUCED in: <modes>`, `NOT REPRODUCED`, or `INCONCLUSIVE`
+when no mode ran on two hosts at the same time. Exit status 1 = reproduced,
+0 = not reproduced, 2 = inconclusive.
+
+A clean result only counts if the hosts really overlapped. To prove the
+detector sees the other host, run a 30 s self test with no lock at all on the
+same hosts (same `--start-at` everywhere); the summary must say
+`detector self test (nolock): works across hosts`:
+
+    python3 ~/nfs-lock-probe.py --dir /efsx/qli/lock-probe --log-dir ~/lock-probe/selftest \
+        --start-at $START --modes nolock --duration 30 | tee ~/lock-probe/selftest/stdout.txt
 
 ## Reading the result
 
