@@ -36,6 +36,32 @@ def host_of(who):
     return who.rsplit(":", 1)[0]
 
 
+def other_inside(v, enters):
+    """(host, lock inode) of the participant that was inside during violation v.
+
+    With --verbose every entry is logged with the inode of the lock file it
+    holds: use the entry named in the marker, else the latest entry of any
+    other process of the same mode in the second before the violation (the
+    marker is often still empty when two hosts enter together).
+    """
+    first = (v.get("holder") or "").split()
+    if first and ":" in first[0]:
+        m = re.search(r" it=(\d+)", v["holder"])
+        for t, it, ino in enters.get((v["mode"], first[0]), []):
+            if m and it == int(m.group(1)):
+                return host_of(first[0]), ino
+    best = None
+    for (mode, who), lst in enters.items():
+        if mode != v["mode"] or who == v["who"]:
+            continue
+        before = [e for e in lst if 0 <= v["t"] - e[0] < 1.0]
+        if before and (best is None or before[-1][0] > best[0]):
+            best = (before[-1][0], host_of(who), before[-1][2])
+    if best:
+        return best[1], best[2]
+    return holder_host(v), None
+
+
 def holder_host(violation):
     """Host named in the marker found by a violation, None if unreadable."""
     first = (violation.get("holder") or "").split(" ", 1)[0]
@@ -139,6 +165,12 @@ def main():
     for key in sorted(set(run_of.values())):
         d, first_end = key
         ev = [e for e in events if run_of.get(e.get("who")) == key]
+        enters = {}
+        for e in ev:
+            if e.get("kind") == "enter":
+                enters.setdefault((e["mode"], e["who"]), []).append((e["t"], e["it"], e["lock"].get("ino")))
+        for lst in enters.values():
+            lst.sort()
         hosts = sorted({host_of(e["who"]) for e in ev})
         print("=" * 100)
         hold = sorted({e.get("hold_ms") for e in ev if e.get("kind") == "summary"})
@@ -162,13 +194,16 @@ def main():
                 continue
             # The holder is what the other participant wrote into the marker;
             # it can be empty when the marker was created but not yet written.
-            cross = [v for v in vio if holder_host(v) not in (None, host_of(v["who"]))]
-            unknown = [v for v in vio if holder_host(v) is None]
+            other = [other_inside(v, enters) for v in vio]
+            cross = [v for v, (h, _) in zip(vio, other) if h not in (None, host_of(v["who"]))]
+            unknown = [v for v, (h, _) in zip(vio, other) if h is None]
+            ino_same = sum(1 for v, (_, i) in zip(vio, other) if i is not None and i == v["lock"].get("ino"))
+            ino_diff = sum(1 for v, (_, i) in zip(vio, other) if i is not None and i != v["lock"].get("ino"))
             stale = sum(e.get("stale_lockfile", 0) for e in sm)
             vanished = sum(e.get("marker_vanished", 0) for e in sm)
             # A cross-host violation proves the other host took part even when
             # its own files are missing.
-            mhosts = {host_of(e["who"]) for e in sm} | {holder_host(v) for v in cross}
+            mhosts = {host_of(e["who"]) for e in sm} | {h for h, _ in other if h}
             iters = sum(e["iterations"] for e in sm)
             waits = [e["wait_ms_median"] for e in sm if e.get("wait_ms_median") is not None]
             p50 = statistics.median(waits) if waits else 0
@@ -198,7 +233,7 @@ def main():
             if errors:
                 notes.append("%d process(es) died: %s" % (len(errors), errors[0].get("error", "?")))
             ok = (len(mhosts) >= 2 and spread <= 5) or bool(cross)
-            verdict[mode] = (ok, len(vio), len(cross), stale, iters, vanished)
+            verdict[mode] = (ok, len(vio), len(cross), stale, iters, vanished, ino_same, ino_diff)
             print("%-24s %5d %6d %9d %7d %7d %7d %8d %8d %10.1f %10.1f  %s" % (
                 mode, len(mhosts), len(sm), iters, len(cross), len(vio) - len(cross) - len(unknown),
                 len(unknown), stale, vanished, p50, mx, "; ".join(notes) or "ok"))
@@ -263,6 +298,15 @@ def main():
             print("  - REPRODUCED in: %s" % ", ".join(
                 "%s (%d violations, %d cross-host, %d stale-lockfile, in %d iterations)"
                 % (m, real[m][1], real[m][2], real[m][3], real[m][4]) for m in bad))
+            same, diff = sum(real[m][6] for m in bad), sum(real[m][7] for m in bad)
+            if same or diff:
+                print("  - lock inodes of the two participants (from --verbose entries): %d different, %d the same"
+                      % (diff, same))
+                if diff and not same:
+                    print("    every overlap had each host holding a lock on a DIFFERENT lock file under the same"
+                          " name: the locks excluded, the lock-file name did not")
+                elif same:
+                    print("    two hosts held a lock on the SAME file at once: the NFS lock itself did not exclude")
             if any(m in bad for m in ("flock", "posix")):
                 print("  - plain flock/lockf fails: the NFS locks themselves do not exclude across hosts")
             elif any(m.startswith("bitbake") for m in bad):
@@ -283,8 +327,8 @@ def main():
             print("  - markers vanished from under their creator: another participant removed them while it was"
                   " inside (probe versions before 2026-10-03 also did this in their end-of-run cleanup)")
         if deleg:
-            print("  - DELEGRETURN grew by %d: the server grants delegations; while a client holds one, the Linux"
-                  " client handles flock() locally" % deleg)
+            print("  - DELEGRETURN grew by %d: the server grants delegations (a client holding one may answer"
+                  " opens and locks of that file without asking the server)" % deleg)
         print()
     sys.exit(status)
 
