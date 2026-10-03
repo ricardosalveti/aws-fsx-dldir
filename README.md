@@ -5,7 +5,8 @@ the same download file while each holds an exclusive `flock()` on a lock file
 on an FSx for OpenZFS (NFSv4.2) mount, after the same workload ran on Amazon
 EFS without the problem. A two-host probe showed that the NFS locks work: the
 race is in BitBake's delete-and-re-create lock-file protocol, happens on EFS
-too, and is about 25 times more frequent on FSx.
+too, and is far more frequent on FSx (about 25 times as a point estimate,
+at least 5 times given only two events on EFS).
 
 - `aws-fsx-dldir-report.md` — the report: environment, timeline, incidents,
   storage x lock-protocol comparison, mechanism, probe results, asks to AWS

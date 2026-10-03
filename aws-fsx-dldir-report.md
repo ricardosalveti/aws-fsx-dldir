@@ -325,7 +325,7 @@ source for this case), which would explain stale answers that even a fresh
 |---|---|---|
 | H1 | FSx does not enforce byte-range locks across clients | **refuted by measurement**: plain `flock()`/`lockf()` 0 overlaps on FSx (and EFS); all 112 attributed overlaps were on different lock files, none on the same file |
 | H2 | acquisition race in BitBake's delete/re-create/check-by-name protocol | **confirmed**: fails on FSx and EFS, never on one host, 0 with the lock file never deleted (`-nounlink`) under the same contention |
-| H3 | NFSv4 delegations on FSx | **amplifier, not an independent failure**: delegations appear only in the re-create modes and only on FSx, where the rate is ~25x EFS's; the link between the two is *inferred* |
+| H3 | NFSv4 delegations on FSx | **amplifier, not an independent failure**: delegations appear only in the re-create modes and only on FSx, where the rate is ~25x EFS's (at least ~5x: EFS had only 2 events); the link between the two is *inferred* |
 | H4 | lost lock state (lease expiry, client-id collision, failover) | no evidence: no lock-recovery or state-manager messages in the probe hosts' kernel logs; overlaps follow simultaneous starts, not time |
 
 Consequence for BitBake: the lock file must not be deleted while other hosts
@@ -415,8 +415,10 @@ every lock mode, and the no-lock self test sees the other host.
 ## 10. What to ask AWS
 
 The question is no longer whether FSx enforces locks; it does. It is why the
-same client-side protocol produces a stale view of a name about 25 times more
-often on FSx for OpenZFS than on EFS, and whether that can be tuned.
+same client-side protocol produces a stale view of a name far more often on
+FSx for OpenZFS than on EFS (about 25 times as a point estimate, at least
+about 5 times at 95% confidence, since EFS had only 2 events in 106
+rounds), and whether that can be tuned.
 
 1. Does the FSx for OpenZFS NFS server grant read or write delegations on
    files a client has just created (we see 0.4-1.7 `DELEGRETURN` per entry

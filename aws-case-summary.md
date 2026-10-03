@@ -1,7 +1,7 @@
 # AWS support case: opening message (draft)
 
 Subject: FSx for OpenZFS: lock files deleted and re-created by many NFSv4.2
-clients go stale ~25x more often than on EFS (delegations?)
+clients go stale far more often than on EFS (~25x; delegations?)
 
 We run a CI build farm (GitHub Actions, ephemeral EC2 runners, Ubuntu 24.04,
 us-west-2) whose build tool (BitBake) shares one download directory between
@@ -27,7 +27,9 @@ we want to be clear about what it shows:
   BitBake and we will take it upstream.
 - **But FSx makes it much more frequent.** With both clients starting at the
   same instant, the protocol overlapped in 57 of 119 rounds on FSx and in 1 of
-  56 on EFS (same clients, same code, same settings). On FSx the clients
+  56 on EFS (same clients, same code, same settings; with only one or two
+  EFS events the ratio is at least ~5x at 95% confidence, ~25x as a point
+  estimate). On FSx the clients
   return delegations (`DELEGRETURN` in `/proc/self/mountstats`, 0.4-1.7 per
   attempt) in exactly the modes that delete and re-create the lock file, and
   almost none in the modes that keep it; on EFS there are none at all.
