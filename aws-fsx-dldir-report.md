@@ -1,38 +1,46 @@
-# Shared BitBake download directory on Amazon FSx for OpenZFS: cross-host lock collisions
+# Shared BitBake download directory on NFS: lock-file collisions, rare on EFS, frequent on FSx for OpenZFS
 
-Evidence pack for an AWS support case. Prepared 2026-09-30 from the GitHub Actions
-logs of `qualcomm-linux/meta-qcom` and `qualcomm-linux/meta-qcom-robotics-sdk`
-(2026-07-01 .. 2026-09-29), the git history of both repositories and the BitBake
-source. Everything below is traceable to a file in the working directory
-(see "Data files" at the end). Statements marked *inference* are not directly
-measured.
+Evidence pack for an AWS support case and for the BitBake upstream discussion.
+Prepared 2026-09-30 from the GitHub Actions logs of `qualcomm-linux/meta-qcom`
+and `qualcomm-linux/meta-qcom-robotics-sdk` (2026-07-01 .. 2026-09-29), the
+git history of both repositories and the BitBake source; updated 2026-10-03
+with the results of `probe/nfs-lock-probe.py` run on two hosts against FSx
+for OpenZFS and Amazon EFS (section 9). Statements marked *inference* are not
+directly measured.
 
 ## 1. Summary
 
 - Since the CI caches moved from Amazon EFS to Amazon FSx for OpenZFS
   (`fs-09119c6fed54104fc`, us-west-2, NFSv4.2), parallel build hosts have
   repeatedly written the same download file at the same time, although each
-  host holds an exclusive `flock()` on a per-file lock file on that mount while
-  it downloads. The corrupted file then fails every later build until it is
-  removed by hand.
-- 12 files were corrupted by cross-host collisions, documented with
-  millisecond timestamps, runner instance ids and client hostnames (section 4,
-  raw lines in `pairs.md`), all on FSx. The same scan over the EFS period
-  (9,389 jobs, 843,000 `do_fetch` tasks, 1,839 downloads where two hosts
-  contended for the same file) found none (section 6). With the BitBake lock
-  protocol held constant (the version in use since 2026-08-26), EFS served 485
-  contended downloads (59 with both hosts starting within 300 ms) without a
-  collision; FSx served 445 (126) and collided on 12 files.
-- The locks are not simply ignored: in the same runs, hosts that arrive while
-  another host holds the lock wait for it and then find the finished file
-  (section 5). The collisions happen when two hosts start the same download
-  within a few hundred milliseconds of each other.
-- BitBake's lock protocol unlinks and re-creates the lock file and validates
-  the lock with `stat()` by name (section 7). That sequence is sensitive to how
-  a NFS server and client handle lookups, unlinked-but-open files and locks on
-  them, which is where EFS and FSx for OpenZFS can differ. Which of the two
-  mechanisms in section 8 applies has not been measured yet; the probe in
-  section 9 measures it directly on both mounts.
+  host takes an exclusive `flock()` on the file's lock file before it
+  downloads. The corrupted file then fails every later build until it is
+  removed by hand. 12 such collisions are documented with millisecond
+  timestamps, instance ids and client addresses (section 4), all on FSx; the
+  EFS period of the same logs has none (section 6).
+- **The NFS locks are not the problem.** A two-host probe (section 9)
+  reproduced the collision on FSx and also, much more rarely, on EFS. In all
+  112 overlaps of the two runs that logged the lock file held at every entry,
+  the two hosts held exclusive locks on two *different* lock files that had the same name at different moments; two
+  locks on the same file never coexisted, and plain `flock()` / `lockf()` on a
+  lock file that stays in place never failed on either file system.
+- **The cause is BitBake's lock-file protocol.** `bb.utils.unlockfile()`
+  deletes the lock file and `bb.utils.lockfile()` re-creates it and accepts
+  the lock after checking, by name, that the name still points to the file it
+  locked (section 7). Across NFS clients that check can pass on two hosts at
+  once. The same probe with the lock file never deleted had 0 collisions in
+  119 rounds in which both hosts started together, against 57 of 119 with the
+  protocol BitBake uses today.
+- **FSx makes it far more frequent.** When both hosts start in the same
+  round, the current protocol collides in 57 of 119 rounds on FSx and in 1 of
+  56 on EFS. The older exclusive-only protocol collides in 5 of 119 on FSx and
+  0 of 65 on EFS. On FSx the server hands out NFSv4 delegations exactly in the
+  modes that delete and re-create the lock file, and EFS hands out none
+  (section 9); that the delegations are what makes FSx worse is an
+  *inference* and the main question for AWS (section 10).
+- Fix on the BitBake side: never delete the lock file (section 8). The
+  questions for AWS are now about delegation and name-caching behaviour on
+  FSx for OpenZFS, not about lock enforcement.
 
 ## 2. Environment
 
@@ -43,7 +51,10 @@ measured.
 | mount point | `/efsx` on the runner; the build container sees `/efsx/qli/<repo>/downloads` as `/downloads` and `/efsx/qli/<repo>/sstate-cache` as `/sstate` | `.github/workflows/build-yocto.yml`, `.github/actions/compile/action.yml`, job logs |
 | previous file system | Amazon EFS mounted at `/efs` (mount options not in the logs; collected by the probe's step 5) | workflow history |
 | clients | ephemeral on-demand EC2 runners, Ubuntu 24.04 image (`foundri-prd-u2404-x64-od-eph-<instance id>`), runner group `gha-prd-foundri-selfhosted-rg`, hostnames `ip-10-185-x-y` (VPC 10.185.0.0/16), GitHub runner 2.337.0 | job logs, "Set up job" |
-| client kernel / NFS client version | not in the logs; collected by the probe | |
+| client kernel / NFS client version | not in the CI logs; the probe hosts (same image family) run Ubuntu 24.04.2, kernel `6.8.0-1030-aws`, Python 3.12.3 | probe `env` records |
+| probe hosts | `ip-10-167-6-167`, `ip-10-167-6-68` (VPC 10.167.0.0/16), both mounting the two file systems below | probe `env` records, `host-info.txt` |
+| probe FSx | FSx for OpenZFS `fs-0960c6bcb45962992.fsx.us-west-2.amazonaws.com:/fsx`, server 10.167.7.111, **not** the CI file system above; same mount options as the CI; `lease_time=30`; server implementation id empty | `findmnt`, `/proc/self/mountstats` |
+| probe EFS | Amazon EFS `fs-095b00661f536ba20.efs.us-west-2.amazonaws.com:/`, `rw,relatime,vers=4.1,rsize=1048576,wsize=1048576,namlen=255,hard,noresvport,proto=tcp,timeo=600,retrans=2,sec=sys,local_lock=none`; `lease_time=90`; implementation id `Amazon EFS` | `findmnt`, `/proc/self/mountstats` |
 | build container | `ghcr.io/siemens/kas/kas:5.5` (Debian trixie, Python 3.13) run by `kas-container`, cache directories bind-mounted from the host | job logs |
 | application | BitBake fetcher, `bb.utils.lockfile()` = `fcntl.flock()` on `<DL_DIR>/<file>.lock`; downloads written to `<DL_DIR>/<file>.tmp` with `wget --continue`, then renamed to `<file>`; `<file>.done` stamp after verification | `lib/bb/fetch/__init__.py`, `lib/bb/fetch/wget.py`, `lib/bb/utils.py` |
 | concurrency | 16-20 build jobs per robotics run, up to ~300 per meta-qcom run, each on its own EC2 instance, all sharing one `DL_DIR` and one `SSTATE_DIR` | job listings |
@@ -67,11 +78,16 @@ Two things changed within a week of each other, so both are tracked:
 | 2026-09-11 15:20 | robotics-sdk | first documented collision (jinja2) | logs |
 | 2026-09-22 04:03 | meta-qcom master PRs | `golang.org.x.sys@v0.48.0.zip` collision; corrupt `.tmp` fails every docker-compose build until 2026-09-28 | logs |
 | 2026-09-28 03:35 | robotics-sdk main | PR #380 merged, main on `/efsx` | GitHub API |
-| 2026-09-29 | meta-qcom | workaround merged: bitbake patch renaming the bad `.tmp` (PR #3250), submitted upstream | git, patchwork |
+| 2026-09-29 | meta-qcom, bitbake | workaround merged: bitbake patch renaming the bad `.tmp` (meta-qcom PR #3250); merged upstream as bitbake `37b9c56ae` | git, patchwork |
+| 2026-10-02 | probe | two-host probe runs on FSx (16:02, 21:15, 22:50 UTC) and EFS (23:07 UTC) | section 9 |
 
 So the control periods are: meta-qcom master on EFS with the new protocol
 (2026-08-26 .. 09-02), robotics main on EFS with the new protocol (09-08 ..
-09-28), and meta-qcom wrynose on FSx with the old protocol (09-02 ..).
+09-28), and meta-qcom wrynose on FSx with the old protocol (09-02 ..). The
+probe adds the comparison the CI logs could not make: the new protocol
+collides on EFS too, at a rate low enough to explain zero CI events there, and
+the old protocol collides on FSx too, about ten times less often than the new
+one (section 9).
 
 ## 4. Incidents
 
@@ -158,7 +174,8 @@ the usual 22-37 ms and finished right after B: they were blocked by B's lock on
 another host. A and B, which started 3 ms apart, were not serialized. The same
 "simultaneous start" pattern holds for every collision in 4a. So the server
 does enforce the locks; what fails is the acquisition when two hosts race for
-the same lock file at the same moment.
+the same lock file at the same moment. The probe (section 9) confirms both
+halves on the real file systems.
 
 ## 6. Storage x lock protocol
 
@@ -208,7 +225,14 @@ Caveats:
   download count above is the exposure that matters and is reported per
   storage for that reason.
 - The wrynose-on-FSx cell (old lock protocol) had only 12 contended
-  downloads, too few to say whether the old protocol is also affected.
+  downloads, too few to say from the logs whether the old protocol is also
+  affected. The probe says it is, at about a tenth of the new protocol's rate
+  (section 9).
+- The probe's rates are consistent with these counts: about 2% per
+  simultaneous start on EFS predicts about one collision in the 59 EFS starts
+  within 300 ms (0 observed), and FSx collided on 12 files in 126 such starts
+  (about 10%). The probe's FSx rate is higher (48%) because its starts are
+  aligned to the millisecond, which CI starts rarely are.
 - 76 meta-qcom job logs from 2026-07-01..07-02 had expired and 25 could not be
   fetched; 80 jobs had no cache directory in their log and are not attributed.
 
@@ -225,6 +249,9 @@ if not verify_donestamp(...):                  # file not there yet
 unlockfile(lf)                                 # 3
 ```
 
+The old protocol takes the exclusive lock directly in step 1 and has no
+step 2.
+
 `bb.utils.lockfile()` (`lib/bb/utils.py:556-590`):
 
 ```
@@ -235,6 +262,7 @@ loop:
     if exists(name) and stat(name).st_ino == st.st_ino:   # LOOKUP+GETATTR, or the client's lookup/attribute cache
         return lf                          # lock accepted
     close(lf); retry                       # the name changed under us
+                                           # (any OSError, ESTALE included, also just retries)
 ```
 
 `bb.utils.unlockfile()` (`lib/bb/utils.py:598-619`):
@@ -242,100 +270,179 @@ loop:
 ```
 try:
     flock(lf, LOCK_EX | LOCK_NB)           # LOCK non-blocking: "am I the only holder?"
-    unlink(name)                           # REMOVE the lock file (only if that succeeded)
+    unlink(name)                           # REMOVE by *name*, whatever file the name points to now
 except OSError: pass
 flock(lf, LOCK_UN)                         # LOCKU
 close(lf)                                  # CLOSE
 ```
 
-With two hosts A and B starting the same download at the same instant:
+The protocol is correct only if every participant sees the name and the file
+behind it the same way the server does at the moment it checks. On one
+machine that holds: two processes on the same probe host never overlapped in
+2,564 entries of the current protocol (section 9). Across NFS clients it does
+not. What the probe measured, for every one of the 112 overlaps of the two
+runs that logged the lock file held at every entry (FSx and EFS):
 
-1. both take the shared lock on the same lock file (inode I1);
-2. both call `lockfile_to_exclusive`: the first one to run `unlockfile` fails
-   the non-blocking promotion (the other still holds shared) and just releases;
-   the second one succeeds, **unlinks I1**, releases;
-3. host A re-opens the name. If its OPEN reached the server before the REMOVE,
-   A gets I1 back and its LOCK is granted as soon as B releases, on a file that
-   no longer has a name. A now validates the lock with `stat(name)`: on a local
-   file system that fails (no name) and A retries; on NFS the answer comes from
-   A's cached lookup of the name unless the client revalidates it with the
-   server, so A can be told "I1" and **accept a lock on an unlinked file**;
-4. host B re-opens the name, creates I2, locks it, validates it (its own cache
-   knows about the unlink), and accepts too.
+- each of the two hosts held an exclusive lock, on two **different** lock
+  files (inodes), both of which had been created under the same name;
+- each had accepted its lock with the check above passing; on FSx 100 of the
+  110 violating hosts passed it on the first attempt, without a retry;
+- in 69 of the FSx overlaps the host that entered second held the **older**
+  file, in 41 the **newer** one.
 
-Both hosts now hold "the" exclusive lock and both run `wget --continue` on the
-same `<file>.tmp`. This only happens when the two hosts go through step 2 at
-the same time, which matches the observed 3-800 ms arrival gaps. With the old
-protocol (exclusive lock from the start) the unlink happens once, at the end
-of a download, so the window should be much smaller (*inference*; the
-wrynose-on-FSx sample in section 6 is too small to confirm it).
+Two paths fit these facts (*inference*, the probe cannot see inside the NFS
+client):
 
-The protocol is BitBake's; whether the stale answer in step 3 is possible
-depends on the NFS client's dentry/attribute caching (`lookupcache`, `ac`,
-directory change attribute handling) and on the server's behaviour for LOCK on
-an unlinked-but-open file and for OPEN/REMOVE ordering across `nconnect=16`
-connections. Those are the points where EFS (NFSv4.1 via efs-utils) and FSx for
-OpenZFS (NFSv4.2, Linux nfsd on ZFS) can legitimately differ.
+1. A host checks its lock against a stale view of the name: the name already
+   points to a newer file on the server (or to none), but the host's client
+   still answers `stat(name)` with the file it holds. That is the "older file"
+   case.
+2. A host that holds a lock on a file whose name has already moved on calls
+   `unlockfile()`, and `unlink(name)` removes the **current** lock file of
+   another host that is inside. The next host to arrive creates a new file,
+   locks it, its check passes, and it enters next to the host whose file was
+   removed. That is the "newer file" case, and it is a consequence of path 1,
+   not an independent one.
 
-## 8. Candidate mechanisms and how to tell them apart
+Re-checking with a new `open()` instead of `stat()` (`bitbake-shared-fresh`)
+did not help on either file system, so the stale view is not limited to
+`stat()`'s attribute cache. Never deleting the lock file (`-nounlink`) removes
+both paths: there is only ever one file under the name.
 
-| # | mechanism | fits the data? | discriminating test |
-|---|---|---|---|
-| H1 | FSx does not enforce byte-range locks across clients | no: later arrivals do wait (section 5) | probe modes `flock`, `posix` would show violations |
-| H2 | acquisition race in BitBake's unlink/re-create/`stat()` protocol, made visible by NFS lookup caching or by LOCK succeeding on an unlinked file | yes: only simultaneous starts collide, and the new protocol multiplies the unlink/re-create churn | probe: `bitbake-shared` fails, `flock` clean, `bitbake-shared-fresh` / `-nounlink` clean, `stale-lockfile` events |
-| H3 | server grants NFSv4 delegations; the client then handles `flock()` locally and the recall path races | possible on FSx (Linux nfsd grants delegations), impossible on EFS (no delegations) | `DELEGRETURN` counter in the probe's `env` records; `flock` mode would also fail |
-| H4 | lost lock state (lease expiry under load, client-id collision between cloned instances, server failover/grace) | unlikely: collisions correlate with simultaneous start, not with time | `dmesg` on the runners (`lock reclaim failed`, `state manager`), server-side lease events |
+Why FSx is so much worse than EFS is not measured. What is measured: on FSx
+the clients return 0.4-1.7 delegations (`DELEGRETURN`) per entry, but only in
+the modes that delete and re-create the lock file;
+in the modes where the file stays (`flock`, `posix`, `-nounlink`) there are
+almost none, and on EFS there are none at all (section 9). A client holding
+a delegation for a file may answer opens and attribute requests for it
+without asking the server (*inference*, not verified against the kernel
+source for this case), which would explain stale answers that even a fresh
+`open()` cannot avoid.
 
-H1 is contradicted by the logs. H2 and H3 are open and only distinguishable by
-running the probe on the real mounts. Note that H2 does not make the difference
-between EFS and FSx go away: the protocol is the same on both, so whatever
-makes the stale answer possible on FSx and not on EFS is still a property of
-the file system / mount (caching semantics, unlinked-file handling, delegations,
-`nconnect`), which is a legitimate question for AWS even if the fix ends up in
-BitBake.
+## 8. Mechanisms, tested
 
-## 9. The missing measurement: `probe/nfs-lock-probe.py`
+| # | mechanism | result |
+|---|---|---|
+| H1 | FSx does not enforce byte-range locks across clients | **refuted by measurement**: plain `flock()`/`lockf()` 0 overlaps on FSx (and EFS); all 112 attributed overlaps were on different lock files, none on the same file |
+| H2 | acquisition race in BitBake's delete/re-create/check-by-name protocol | **confirmed**: fails on FSx and EFS, never on one host, 0 with the lock file never deleted (`-nounlink`) under the same contention |
+| H3 | NFSv4 delegations on FSx | **amplifier, not an independent failure**: delegations appear only in the re-create modes and only on FSx, where the rate is ~25x EFS's; the link between the two is *inferred* |
+| H4 | lost lock state (lease expiry, client-id collision, failover) | no evidence: no lock-recovery or state-manager messages in the probe hosts' kernel logs; overlaps follow simultaneous starts, not time |
+
+Consequence for BitBake: the lock file must not be deleted while other hosts
+may be using it (`-nounlink` mode). That is a new change to
+`bb.utils.unlockfile()` (and so to `lockfile_to_exclusive()`, which calls
+it): BitBake master still deletes the lock file on every release
+(`lib/bb/utils.py`, `os.unlink(lf.name)`). The deletion keeps `DL_DIR` free
+of `.lock` files; leaving them in place costs one empty file per download.
+The `.tmp` rename patch (meta-qcom PR #3250, merged in BitBake master as
+`37b9c56ae`) fixes a different part: it stops a corrupt partial download from
+failing every later build, but does not stop two hosts from writing it at
+once.
+
+Consequence for operations: blocking `flock()` on these mounts is resolved by
+client-side polling. Waiters routinely waited tens of seconds (up to 134 s on
+FSx, median 3.6 s for plain `flock` on EFS in the round runs), long after the
+holder released. That is separate from the collisions and plausibly behind
+the `do_fetch` stall pile-ups seen in CI.
+
+## 9. Probe results: `probe/nfs-lock-probe.py`
 
 A standalone Python script (standard library only) that runs the same
 lock/critical-section loop on several hosts against one shared directory and
-detects any overlap with an `O_CREAT|O_EXCL` marker. Modes: `flock`, `posix`
-(plain locks on a persistent lock file), `bitbake`, `bitbake-shared` (the
-protocols above, copied from `bb/utils.py`), `bitbake-shared-fresh` and
-`bitbake-shared-nounlink` (two candidate fixes). It also records, per mode,
-`stale-lockfile` events (lock accepted on a file with `st_nlink == 0`) and the
-NFS per-operation counters from `/proc/self/mountstats` before and after
-(`LOCK`, `LOCKU`, `OPEN`, `REMOVE`, `LOOKUP`, `DELEGRETURN`, ...), plus
-`uname`, mount options and the NFS client identifier.
+detects any overlap with an `O_CREAT|O_EXCL` marker created inside the
+critical section. Modes: `flock`, `posix` (plain locks on a lock file that
+stays in place), `bitbake` (the old protocol), `bitbake-shared` (today's
+protocol, both copied from `bb/utils.py`), and two candidate fixes:
+`bitbake-shared-fresh` (check with a new `open()`) and
+`bitbake-shared-nounlink` (never delete the lock file). With `--verbose`
+every entry is logged with the inode of the lock file it holds, which is what
+attributes each overlap to the other host and tells "same file" from
+"different file". `probe/summarize-probe.py` turns the logs of all hosts into
+the tables below. How to run both: `probe/README.md`.
 
-Validated locally on ext4 with 6 processes: 0 violations in every lock mode,
-4,006 violations in the self-test mode without locks (`nolock`).
+Runs on 2026-10-02, hosts `ip-10-167-6-167` and `ip-10-167-6-68`, 2 workers
+per host, 20 ms inside the critical section:
 
-Instructions to run it by hand on two runners, on `/efsx` and then on `/efs`,
-are in `probe/README.md`. One run of each takes ~14 minutes. The results decide
-between H1/H2/H3 and give AWS the exact operation mix.
+| run (UTC) | file system | starts | result |
+|---|---|---|---|
+| 16:02 | FSx `fs-0960c6bcb45962992` | free-running | `bitbake-shared` 6 overlaps, `-fresh` 3; `flock`/`posix` 0 in ~7,800 entries |
+| 16:22 | same FSx, **one host only** | free-running | 0 overlaps in every mode (2,564 `bitbake-shared` entries) |
+| 21:15 | same FSx | free-running | `bitbake-shared` 5, `-fresh` 2; `flock`/`posix` 0 in ~7,800 entries |
+| 22:50 | same FSx | aligned to 1 s rounds, `--verbose` | table below |
+| 23:07 | EFS `fs-095b00661f536ba20` | aligned to 1 s rounds, `--verbose` | table below |
+
+The free-running runs show the problem but compare modes poorly: after the
+first seconds of a mode one host keeps winning the lock and the other waits,
+so most entries see no contention. The aligned runs start every attempt of
+every process at the same wall-clock second, which is the CI pattern (two
+builds starting the same download together), and count per round in which
+both hosts started:
+
+| mode | FSx: rounds with an overlap | EFS: rounds with an overlap |
+|---|---|---|
+| `flock` | 0 / 88 | 0 / 19 |
+| `posix` | 0 / 119 | 0 / 23 |
+| `bitbake` (old protocol) | 5 / 119 (4%) | 0 / 65 |
+| `bitbake-shared` (today's protocol) | **57 / 119 (48%)** | **1 / 56 (2%)** |
+| `bitbake-shared-fresh` | 48 / 119 (40%) | 1 / 50 (2%) |
+| `bitbake-shared-nounlink` | **0 / 119** | 0 / 36 |
+
+Every overlap in both aligned runs (110 on FSx, 2 on EFS) was between the two
+hosts, each holding a lock on a different lock file. EFS completed fewer
+rounds per mode because its blocking locks waited longer (section 8), which
+is why its denominators are smaller.
+
+NFS operations per entry on FSx, aligned run, per host:
+
+| mode | LOCK | OPEN | REMOVE | DELEGRETURN |
+|---|---|---|---|---|
+| `flock` | 1.8-2.9 | 1.0 | 1.0 | 0.0-0.1 |
+| `posix` | 1.8-3.2 | 1.0 | 1.0 | 0.0 |
+| `bitbake` | 2.4-3.9 | 2.1-2.5 | 1.9-2.0 | 0.4-1.2 |
+| `bitbake-shared` | 5.0-5.2 | 2.6-2.9 | 1.6-2.3 | 0.7-1.6 |
+| `bitbake-shared-fresh` | 5.1-5.5 | 3.0-3.1 | 1.5-2.5 | 1.1-1.7 |
+| `bitbake-shared-nounlink` | 4.9-5.6 | 1.0 | 1.0 | 0.0 |
+
+On EFS `DELEGRETURN` is 0 in every mode. (`REMOVE` is 1.0 in the modes that
+never delete the lock file because the probe's marker is created and deleted
+once per entry.) `ESTALE` errors during lock acquisition, which
+`bb.utils.lockfile()` silently retries, occurred in 173 of 1,561 BitBake-mode
+entries on FSx and 287 of 1,047 on EFS.
+
+Validated locally on ext4 (one machine, two simulated hosts): 0 overlaps in
+every lock mode, and the no-lock self test sees the other host.
 
 ## 10. What to ask AWS
 
-1. For `fs-09119c6fed54104fc` at 2026-09-11 15:20:09-11 UTC (clients
-   10.185.112.182 and 10.185.117.172, file
-   `/fsx/qli/meta-qcom-robotics-sdk/downloads/jinja2-3.1.6.tar.gz.lock`) and
-   2026-09-22 04:02:00-04:04 UTC (clients 10.185.124.239, 10.185.126.108,
-   10.185.123.84, file
-   `/fsx/qli/meta-qcom/downloads/golang.org.x.sys@v0.48.0.zip.lock`): the
-   server-side sequence of OPEN / LOCK / LOCKU / REMOVE for that path, and
-   whether two WRITE_LT locks were held at the same time, or a LOCK was granted
-   on an unlinked file handle.
-2. Whether the FSx for OpenZFS NFS server grants read/write delegations to
-   NFSv4.2 clients, and the lease time in effect.
-3. The server's behaviour for LOCK requests on a file that has been REMOVEd
-   while other clients still hold it open, and for the ordering of OPEN and
-   REMOVE arriving over different connections of one `nconnect=16` client.
-4. Any known interaction between `nconnect` and NFSv4.x locking on FSx for
-   OpenZFS, and the recommended mount options for lock-heavy workloads
-   (`lookupcache`, `actimeo`, `nconnect`).
-5. Whether there were server events (failover, maintenance, lease expiry,
-   client-id conflicts) for this file system on 2026-09-11, 09-12, 09-13,
-   09-15, 09-22 and 09-24.
+The question is no longer whether FSx enforces locks; it does. It is why the
+same client-side protocol produces a stale view of a name about 25 times more
+often on FSx for OpenZFS than on EFS, and whether that can be tuned.
+
+1. Does the FSx for OpenZFS NFS server grant read or write delegations on
+   files a client has just created (we see 0.4-1.7 `DELEGRETURN` per entry
+   when the lock file is deleted and re-created, about 0 when it stays in
+   place, and none on EFS)? Can delegations be
+   disabled or limited for a file system, and is that advisable?
+2. When client B removes a file on which client A holds a delegation, is the
+   delegation recalled and returned before the REMOVE completes, and until
+   then can client A's view of the name still resolve to the removed file?
+3. For one overlap on the probe file system `fs-0960c6bcb45962992`:
+   2026-10-02 22:56:46-22:56:48 UTC, path
+   `/fsx/qli/lock-probe/probe-bitbake-shared.lock` (and the matching
+   `probe-bitbake-shared.marker`), clients 10.167.6.68 (inside from
+   22:56:47.015, holding a lock on inode 12592228) and 10.167.6.167 (inside at
+   22:56:47.021, holding a lock on inode 12592127), can you provide the server-side sequence of OPEN, LOCK, LOCKU,
+   REMOVE, CB_RECALL and DELEGRETURN for that path? The first CI collision
+   (`fs-09119c6fed54104fc`, 2026-09-11 15:20:09-11 UTC, clients
+   10.185.112.182 and 10.185.117.172,
+   `/fsx/qli/meta-qcom-robotics-sdk/downloads/jinja2-3.1.6.tar.gz.lock`) is
+   the same pattern if older logs are still available.
+4. Recommended client mount options for this access pattern (many clients
+   creating, locking and deleting the same small files): `lookupcache`,
+   `actimeo`, `nconnect=16` with NFSv4.2 locking, and their cost.
+5. Does the server send `CB_NOTIFY_LOCK` to clients waiting on a blocked
+   lock? Waiters here are woken by client polling, tens of seconds after the
+   lock is free.
 
 ## 11. Data files
 
@@ -346,14 +453,19 @@ All in this repository:
 - `metaqcom/runs.tsv`, `robotics/runs.tsv` — all workflow runs in the window; `*/alljobs.tsv` — every job of every attempt of the inspected runs (runner name, times, conclusion)
 - `metaqcom/scan*/*.json`, `robotics/scan*/*.json` — per-job extracts (hits, environment lines, `do_fetch` intervals)
 - `cells.txt`, `metaqcom/contention.txt`, `robotics/contention.txt`, `incidents.txt` — the outputs behind section 6
-- `aws-case-summary.md` — draft opening message for the support case
+- `aws-case-summary.md` — opening message for the support case
 - `robotics/full/*.log` — full logs of run 35938315722 (qairt case)
 - `cells.py`, `contention2.py`, `incidents.py`, `pairs.py`, `timeline.py`, `scanlog.py`, `finalize-analysis.sh` — the tooling
-- `probe/nfs-lock-probe.py`, `probe/README.md` — the probe and how to run it
+- `probe/nfs-lock-probe.py`, `probe/summarize-probe.py`, `probe/README.md` — the probe, its summarizer and how to run them
+
+The raw probe logs of section 9 (one tarball per host) are not in this
+repository; they are available on request.
 
 Method caveats: GitHub keeps logs 90 days, so nothing before 2026-07-01 was
 available; job logs carry the runner's own timestamps (chrony-synced, sub-ms
 agreement between hosts in the jinja2 case); "collision" requires a checksum
 warning on at least two hosts for the same file within 30 s, so a collision
 where one host's wget finished before the other started writing is counted as
-a single-host event.
+a single-host event. The probe ran on a different FSx file system than the
+CI, with the same mount options; the EFS file system it used is not known to
+be the one the CI used before 2026-09-02.

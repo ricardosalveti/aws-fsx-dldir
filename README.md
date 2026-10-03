@@ -3,10 +3,12 @@
 Evidence pack for an AWS support case about parallel build hosts corrupting
 the same download file while each holds an exclusive `flock()` on a lock file
 on an FSx for OpenZFS (NFSv4.2) mount, after the same workload ran on Amazon
-EFS without the problem.
+EFS without the problem. A two-host probe showed that the NFS locks work: the
+race is in BitBake's delete-and-re-create lock-file protocol, happens on EFS
+too, and is about 25 times more frequent on FSx.
 
 - `aws-fsx-dldir-report.md` — the report: environment, timeline, incidents,
-  storage x lock-protocol comparison, mechanism, open hypotheses, asks to AWS
+  storage x lock-protocol comparison, mechanism, probe results, asks to AWS
 - `aws-case-summary.md` — draft opening message for the support case
 - `pairs.md` — raw job log lines of every collision, per host, with ms timestamps
 - `incidents.tsv` — machine-readable incident table
